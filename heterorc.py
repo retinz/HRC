@@ -267,6 +267,7 @@ def time_resolved_decoding_heterorc(
     fs=None,
     rc_params=None,
     scale_percentile=99,
+    z_score=True,
     alphas=(0.001, 0.01, 0.1, 1.0, 10.0, 100.0,1000.0),
     shuffle=True,
     cv_random_state=42,
@@ -302,6 +303,13 @@ def time_resolved_decoding_heterorc(
                              bidirectional=True, merge_mode='product')
     scale_percentile : float
         Percentile for robust amplitude scaling on training data (per fold).
+    z_score : bool
+        If True (default), z-score each channel independently before percentile
+        scaling. The per-channel mean and standard deviation are computed from
+        the training fold only (collapsed over trials and time) and then applied
+        to both training and test data to prevent data leakage.  This step
+        equalises the vastly different amplitude scales of magnetometers (T) and
+        gradiometers (T/m) before the data enters the reservoir.
     alphas : iterable
         RidgeClassifierCV alpha grid.
     shuffle : bool
@@ -381,6 +389,17 @@ def time_resolved_decoding_heterorc(
     for fold_id, (train_idx, test_idx) in enumerate(skf.split(X, y)):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
+
+        # Per-channel z-scoring using training statistics only (avoid leakage).
+        # Mean and std are computed over trials and time for each channel,
+        # normalising the large amplitude differences between magnetometers and
+        # gradiometers before percentile scaling and the RC transform.
+        if z_score:
+            ch_mean = X_train.mean(axis=(0, 2), keepdims=True)   # (1, n_channels, 1)
+            ch_std = X_train.std(axis=(0, 2), keepdims=True)     # (1, n_channels, 1)
+            ch_std[ch_std == 0] = 1.0  # avoid division by zero for flat channels
+            X_train = (X_train - ch_mean) / ch_std
+            X_test = (X_test - ch_mean) / ch_std
 
         # Robust scaling factor computed on training set only (avoid leakage)
         scale_val = np.percentile(np.abs(X_train), scale_percentile)
