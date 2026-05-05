@@ -224,6 +224,11 @@ def analyze_dynamics(
     n_clusters=3,
     top_n=30,
     phase_name="Unknown",
+    # Clustering criterion: 'maxclust' (fixed n_clusters) or 'inconsistent' (data-adaptive).
+    # Higher inconsistent_threshold gives fewer, bigger clusters.
+    cluster_criterion='maxclust',
+    inconsistent_threshold=1.15,
+    inconsistent_depth=2,
     # --- ERP Parameters ---
     erp_range=(-0.2, 0.6),
     erp_baseline_mode="mean",   
@@ -378,12 +383,31 @@ def analyze_dynamics(
     cluster_labels = np.ones(top_n, dtype=int)
     Z = None
     try:
-        X_for_clustering = X_scaled.T 
+        X_for_clustering = X_scaled.T
         Z = sch.linkage(X_for_clustering, method='ward', metric='euclidean')
-        cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
-        print(f"-> Clustering: requested {n_clusters}, got {int(np.max(cluster_labels))}")
+        # Two cut modes are supported.
+        # 'maxclust' enforces exactly n_clusters; 'inconsistent' is data-adaptive:
+        # branches whose linkage height is similar to neighbours within `depth` levels
+        # are merged. Higher inconsistent_threshold gives fewer, bigger clusters.
+        if cluster_criterion == 'inconsistent':
+            cluster_labels = fcluster(
+                Z,
+                t=inconsistent_threshold,
+                criterion='inconsistent',
+                depth=inconsistent_depth,
+            )
+            print(
+                f"-> Clustering (inconsistent, t={inconsistent_threshold}, "
+                f"depth={inconsistent_depth}): got {int(np.max(cluster_labels))}"
+            )
+        else:
+            cluster_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+            print(f"-> Clustering (maxclust): requested {n_clusters}, got {int(np.max(cluster_labels))}")
     except Exception as e:
         print(f"-> Clustering failed: {e}")
+
+    # Effective count drives layout (may differ from n_clusters under 'inconsistent')
+    n_clusters_eff = int(np.max(cluster_labels))
 
     # --- 4. Consistent Virtual Sources ---
     virtual_sources = {}
@@ -505,7 +529,8 @@ def analyze_dynamics(
     
     # B) Dendrogram
     if Z is not None:
-        thr = Z[-(n_clusters - 1), 2] - 1e-12 if n_clusters >= 2 else 0
+        # Use the effective count so dendrogram colouring matches the actual cut
+        thr = Z[-(n_clusters_eff - 1), 2] - 1e-12 if n_clusters_eff >= 2 else 0
         sch.dendrogram(
             Z,
             ax=ax_dend, 
@@ -565,7 +590,7 @@ def analyze_dynamics(
         
         ax_erp.set_title(f"{src_name}", color=c_color, fontweight='normal')
         ax_erp.axvline(0, color='k', ls='--', alpha=0.3)
-        if row_i == n_clusters-1: ax_erp.set_xlabel("Time (s)")
+        if row_i == n_clusters_eff-1: ax_erp.set_xlabel("Time (s)")
         ax_erp.set_ylabel("Virtual source (a.u.)")
         _set_axis_format(ax_erp, 'x')
         _set_axis_format(ax_erp, 'y', style='sci')
@@ -606,7 +631,7 @@ def analyze_dynamics(
             )
             if (row_i == 0) and (im_tfr_ref is None):  im_tfr_ref = im
             if row_i == 0: ax_tfr.set_title(class_names[k], fontsize=settings['label_size'], pad=4)             
-            if row_i == n_clusters-1:  ax_tfr.set_xlabel("Time (s)")
+            if row_i == n_clusters_eff-1:  ax_tfr.set_xlabel("Time (s)")
             if k == 0: ax_tfr.set_ylabel("Frequency (Hz)")
             else: ax_tfr.set_yticks([])
             _set_axis_format(ax_tfr, 'x')
@@ -632,7 +657,7 @@ def analyze_dynamics(
         ticks = [2, 5, 10, 20, 35]
         ax_psd.set_xticks(ticks)
         ax_psd.set_xticklabels([f"{t:.0f}" for t in ticks]) 
-        if row_i == n_clusters-1:ax_psd.set_xlabel("Frequency (Hz)")
+        if row_i == n_clusters_eff-1:ax_psd.set_xlabel("Frequency (Hz)")
  
         ax_psd.set_ylabel("Power (dB)")
         _set_axis_format(ax_psd, 'y', style='sci')
@@ -802,6 +827,11 @@ def analyze_dynamics_group(
     n_clusters=2,
     top_n=10,
     phase_name="Group Average",
+    # Clustering criterion: 'maxclust' (fixed n_clusters) or 'inconsistent' (data-adaptive).
+    # Higher inconsistent_threshold gives fewer, bigger clusters.
+    cluster_criterion='maxclust',
+    inconsistent_threshold=1.15,
+    inconsistent_depth=2,
     # --- ERP Parameters ---
     erp_range=(-0.2, 0.6),
     erp_baseline_mode="mean",   
@@ -915,10 +945,27 @@ def analyze_dynamics_group(
     # ---------------------------------------------------------------------
     # PHASE 2: Global Spatial Clustering
     # ---------------------------------------------------------------------
-    print(f"-> Phase 2: Global Hierarchical Clustering (N={n_clusters})...")
+    print(f"-> Phase 2: Global Hierarchical Clustering (criterion={cluster_criterion})...")
     X_global = np.array(global_spatial_features)
     Z = sch.linkage(X_global, method='ward', metric='euclidean')
-    global_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+    # Same dispatch as analyze_dynamics: 'maxclust' for fixed N,
+    # 'inconsistent' for data-adaptive cuts that yield variable cluster counts.
+    if cluster_criterion == 'inconsistent':
+        global_labels = fcluster(
+            Z,
+            t=inconsistent_threshold,
+            criterion='inconsistent',
+            depth=inconsistent_depth,
+        )
+        print(
+            f"-> Inconsistent cut (t={inconsistent_threshold}, "
+            f"depth={inconsistent_depth}): got {int(np.max(global_labels))} clusters"
+        )
+    else:
+        global_labels = fcluster(Z, t=n_clusters, criterion='maxclust')
+
+    # Effective cluster count drives downstream row layout
+    n_clusters_eff = int(np.max(global_labels))
 
     unit_counter = 0
     for sub in all_sub_data:
@@ -935,11 +982,12 @@ def analyze_dynamics_group(
     
     if figsize is None:
         base_w = 4 * len(width_ratios)
-        base_h = 6 + 4 * n_clusters
+        # Use effective count so the figure scales to the actual number of clusters
+        base_h = 6 + 4 * n_clusters_eff
         figsize = (base_w * 1.2, base_h * 1.2) if plot_style == "poster" else (base_w, base_h)
 
     fig = plt.figure(figsize=figsize, constrained_layout=True)
-    gs_outer = gridspec.GridSpec(n_clusters + 1, 1, height_ratios=[1.0] * (n_clusters + 1), figure=fig)
+    gs_outer = gridspec.GridSpec(n_clusters_eff + 1, 1, height_ratios=[1.0] * (n_clusters_eff + 1), figure=fig)
     # --- Panel A: Scatter Plot ---
     ax_scat = fig.add_subplot(gs_outer[0])
     
@@ -1063,7 +1111,7 @@ def analyze_dynamics_group(
             ax_erp.plot(times_plot, np.mean(ga_erps[c], axis=0), color=cond_colors[i], label=class_names[i])
         ax_erp.set_title(f"Cluster {c_id}", color=c_color)
         ax_erp.axvline(0, color='k', ls='--', alpha=0.3)
-        if row_i == n_clusters-1: ax_erp.set_xlabel("Time (s)")
+        if row_i == n_clusters_eff-1: ax_erp.set_xlabel("Time (s)")
         ax_erp.set_ylabel("Virtual source (a.u.)")
         if row_i == 0: ax_erp.legend(loc="lower right", fontsize=10, frameon=False, ncol=2)
         _force_symmetric_ylim(ax_erp, np.concatenate([np.mean(ga_erps[c], axis=0) for c in classes]))
@@ -1082,7 +1130,7 @@ def analyze_dynamics_group(
             if row_i == 0: ax_tfr.set_title(class_names[k], fontsize=settings['label_size'])
             if k == 0: ax_tfr.set_ylabel("Freq (Hz)")
             else: ax_tfr.set_yticks([])
-            if row_i == n_clusters-1: ax_tfr.set_xlabel("Time (s)")
+            if row_i == n_clusters_eff-1: ax_tfr.set_xlabel("Time (s)")
             _set_axis_format(ax_tfr, 'x')
 
         # --- 3. Plot Grand Average PSD ---
@@ -1107,7 +1155,7 @@ def analyze_dynamics_group(
         ticks = [2, 5, 10, 20, 35]
         ax_psd.set_xticks(ticks)
         ax_psd.set_xticklabels([f"{t:.0f}" for t in ticks])
-        if row_i == n_clusters-1: ax_psd.set_xlabel("Frequency (Hz)")
+        if row_i == n_clusters_eff-1: ax_psd.set_xlabel("Frequency (Hz)")
         ax_psd.set_ylabel("Power (dB)")
         _set_axis_format(ax_psd, 'y', style='sci')
 
